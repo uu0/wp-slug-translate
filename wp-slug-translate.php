@@ -1,17 +1,18 @@
 <?php
 /*
 Plugin Name: WP Slug Translate
-Plugin URI: http://boliquan.com/wp-slug-translate/
+Plugin URI: https://github.com/uu0/wp-slug-translate
 Description: WP Slug Translate can translate the post slug into English. It will take the post ID as slug when translation failure.
-Version: 1.8.8
-Author: BoLiQuan
-Author URI: http://boliquan.com/
+Version: 1.0.0
+Author: uu0
+Author URI: https://github.com/uu0
 Text Domain: WP-Slug-Translate
 Domain Path: /lang
 */
 
-define("CLIENTID",get_option('wp_slug_translate_clientid'));
-define("CLIENTSECRET",get_option('wp_slug_translate_clientsecret'));
+define("APIKEY",get_option('wp_slug_translate_apikey'));
+define("APIBASE",get_option('wp_slug_translate_apibase'));
+define("MODEL",get_option('wp_slug_translate_model'));
 define("SOURCE",get_option('wp_slug_translate_language'));
 define("TARGET","en");
 
@@ -23,6 +24,120 @@ function load_wp_slug_translate_lang(){
 	}
 }
 add_filter('init','load_wp_slug_translate_lang');
+
+// 获取可用模型列表
+function wp_slug_translate_get_available_models($force_refresh = false) {
+	$api_key = get_option('wp_slug_translate_apikey', '');
+	$api_base = get_option('wp_slug_translate_apibase', 'https://api.siliconflow.cn/v1');
+
+	// 如果强制刷新,从API获取
+	if ($force_refresh) {
+		if (empty($api_key)) {
+			return new WP_Error('no_api_key', 'API密钥未配置');
+		}
+
+		$endpoint = rtrim($api_base, '/') . '/models';
+
+		$response = wp_remote_get($endpoint, array(
+			'headers' => array(
+				'Authorization' => 'Bearer ' . $api_key,
+				'Content-Type'  => 'application/json',
+			),
+			'timeout' => 30
+		));
+
+		if (is_wp_error($response)) {
+			return $response;
+		}
+
+		$body = wp_remote_retrieve_body($response);
+		$data = json_decode($body, true);
+
+		if (json_last_error() !== JSON_ERROR_NONE) {
+			return new WP_Error('json_decode_error', '无法解析API响应');
+		}
+
+		if (!isset($data['data'])) {
+			return new WP_Error('invalid_response', 'API返回数据格式不正确');
+		}
+
+		// 提取聊天模型
+		$models = $data['data'];
+		$chat_models = array();
+
+		foreach ($models as $model) {
+			$model_id = $model['id'];
+			$display_name = isset($model['display_name']) ? $model['display_name'] : $model_id;
+
+			// 只包含聊天模型,排除图片生成模型
+			if (strpos(strtolower($model_id), 'flux') === false &&
+				strpos(strtolower($model_id), 'stable') === false &&
+				strpos(strtolower($model_id), 'sd') === false &&
+				strpos(strtolower($model_id), 'diffusion') === false) {
+				$chat_models[$model_id] = $display_name;
+			}
+		}
+
+		// 按名称排序
+		asort($chat_models);
+
+		// 缓存结果
+		update_option('wp_slug_translate_available_models', $chat_models);
+		update_option('wp_slug_translate_models_last_update', current_time('timestamp'));
+
+		return array(
+			'success' => true,
+			'models' => $chat_models,
+			'total' => count($chat_models)
+		);
+	}
+
+	// 尝试从缓存获取
+	$cached_models = get_option('wp_slug_translate_available_models', array());
+	if (!empty($cached_models)) {
+		return array(
+			'success' => true,
+			'models' => $cached_models,
+			'total' => count($cached_models)
+		);
+	}
+
+	// 如果没有缓存,返回空数组
+	return array(
+		'success' => true,
+		'models' => array(),
+		'total' => 0
+	);
+}
+
+// AJAX 处理刷新模型列表
+function wp_slug_translate_refresh_models_ajax() {
+	// 检查权限
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(array('message' => '权限不足'));
+	}
+
+	// 检查nonce
+	if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'wp_slug_translate_nonce')) {
+		wp_send_json_error(array('message' => '安全验证失败'));
+	}
+
+	// 从API获取模型列表(强制刷新)
+	$result = wp_slug_translate_get_available_models(true);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(array(
+			'message' => $result->get_error_message()
+		));
+	}
+
+	wp_send_json_success(array(
+		'message' => '模型列表刷新成功',
+		'models' => $result['models'],
+		'total' => $result['total']
+	));
+}
+add_action('wp_ajax_wp_slug_translate_refresh_models', 'wp_slug_translate_refresh_models_ajax');
 
 class WstHttpRequest
 {
@@ -46,47 +161,40 @@ class WstHttpRequest
 
 class WstMicrosoftTranslator extends WstHttpRequest
 {
-	private $_clientID = CLIENTID;
-	private $_clientSecret = CLIENTSECRET;
+	private $_apiKey = APIKEY;
+	private $_apiBase = APIBASE;
+	private $_model = MODEL;
 	private $_fromLanguage = SOURCE;
 	private $_toLanguage = TARGET;
 
-	private $_grantType = "client_credentials";
-	private $_scopeUrl = "http://api.microsofttranslator.com";
-	private $_authUrl = "https://datamarket.accesscontrol.windows.net/v2/OAuth2-13/";
-
-	private function _getTokens(){
-		try{
-			$header = array('User-Agent: Mozilla/5.0 (Windows NT 5.1; rv:6.0.1) Gecko/20100101 Firefox/6.0.1');
-			$postData = array(
-				'grant_type' => $this->_grantType,
-				'scope' => $this->_scopeUrl,
-				'client_id' => $this->_clientID,
-				'client_secret' => $this->_clientSecret
-			);
-			$response = $this->curlRequest($this->_authUrl, $header, $postData);
-			$jsonObj = json_decode($response);
-			if(!empty($jsonObj->access_token)){
-				return $jsonObj->access_token;
-			}
-		}
-		catch(Exception $e){
-			//echo "Exception-" . $e->getMessage();
-		}
-	}
-
 	function translate($inputStr){
-		$params = "text=" . rawurlencode($inputStr) . "&from=" . $this->_fromLanguage . "&to=" . $this->_toLanguage;
-		$translateUrl = "http://api.microsofttranslator.com/v2/Http.svc/Translate?$params";
-		$accessToken = $this->_getTokens();
-		$authHeader = "Authorization: Bearer " . $accessToken;
-		$header = array($authHeader, "Content-Type: text/xml");
-		$curlResponse = $this->curlRequest($translateUrl, $header);
-		
-		$xmlObj = simplexml_load_string($curlResponse);
+		$translateUrl = rtrim($this->_apiBase, '/') . '/chat/completions';
+		$authHeader = "Authorization: Bearer " . $this->_apiKey;
+		$header = array($authHeader, "Content-Type: application/json");
+
+		$prompt = "Translate the following text from {$this->_fromLanguage} to {$this->_toLanguage}. Return only the translated text, nothing else.";
+		$postData = array(
+			'model' => $this->_model,
+			'messages' => array(
+				array(
+					'role' => 'system',
+					'content' => 'You are a professional translator.'
+				),
+				array(
+					'role' => 'user',
+					'content' => $prompt . "\n\nText: " . $inputStr
+				)
+			),
+			'temperature' => 0.3,
+			'max_tokens' => 1000
+		);
+
+		$curlResponse = $this->curlRequest($translateUrl, $header, json_encode($postData));
+		$jsonObj = json_decode($curlResponse);
+
 		$translatedStr = '';
-		foreach((array)$xmlObj[0] as $val){
-			$translatedStr = $val;
+		if(!empty($jsonObj->choices) && !empty($jsonObj->choices[0]->message->content)){
+			$translatedStr = $jsonObj->choices[0]->message->content;
 		}
 
 		return $translatedStr;
@@ -145,8 +253,9 @@ add_filter('name_save_pre', 'wp_slug_translate', 1);
 }
 
 function wp_slug_translate_activate(){
-	add_option('wp_slug_translate_clientid','wp-slug-translate');
-	add_option('wp_slug_translate_clientsecret','pK2JdEwF/Janzz2O36Lgkq0QcDkc4Fuw0HqJvWVIFLQ=');
+	add_option('wp_slug_translate_apikey','');
+	add_option('wp_slug_translate_apibase','https://api.siliconflow.cn/v1');
+	add_option('wp_slug_translate_model','deepseek-ai/DeepSeek-V3');
 	add_option('wp_slug_translate_language','zh-CHS');
 	add_option('wp_slug_translate_secondmode','');
 	add_option('wp_slug_translate_deactivate','');
@@ -155,8 +264,9 @@ register_activation_hook( __FILE__, 'wp_slug_translate_activate' );
 
 if(get_option("wp_slug_translate_deactivate")=='yes'){
 	function wp_slug_translate_deactivate(){
-		delete_option('wp_slug_translate_clientid');
-		delete_option('wp_slug_translate_clientsecret');
+		delete_option('wp_slug_translate_apikey');
+		delete_option('wp_slug_translate_apibase');
+		delete_option('wp_slug_translate_model');
 		delete_option('wp_slug_translate_language');
 		delete_option('wp_slug_translate_secondmode');
 		delete_option('wp_slug_translate_deactivate');

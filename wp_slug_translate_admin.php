@@ -2,18 +2,44 @@
 function wp_slug_translate_admin(){
 	add_options_page('WP Slug Translate Options', 'WP Slug Translate','manage_options', __FILE__, 'wp_slug_translate_page');
 	add_action('admin_init','wp_slug_translate_register');
+	add_action('admin_enqueue_scripts','wp_slug_translate_enqueue_scripts');
 }
+
+// 加载脚本和样式
+function wp_slug_translate_enqueue_scripts($hook) {
+	if (strpos($hook, 'wp_slug_translate') === false) {
+		return;
+	}
+
+	// 加载 JavaScript
+	wp_enqueue_script(
+		'wp-slug-translate-admin',
+		plugin_dir_url(__FILE__) . 'assets/js/admin.js',
+		array('jquery'),
+		'1.0.0',
+		true
+	);
+
+	// 本地化脚本
+	wp_localize_script('wp-slug-translate-admin', 'wp_slug_translate_data', array(
+		'ajax_url' => admin_url('admin-ajax.php'),
+		'nonce' => wp_create_nonce('wp_slug_translate_nonce')
+	));
+}
+
 function wp_slug_translate_register(){
-	register_setting('wst-settings','wp_slug_translate_clientid');
-	register_setting('wst-settings','wp_slug_translate_clientsecret');
+	register_setting('wst-settings','wp_slug_translate_apikey');
+	register_setting('wst-settings','wp_slug_translate_apibase');
+	register_setting('wst-settings','wp_slug_translate_model');
 	register_setting('wst-settings','wp_slug_translate_language');
 	register_setting('wst-settings','wp_slug_translate_secondmode');
 	register_setting('wst-settings','wp_slug_translate_deactivate');
 }
 function wp_slug_translate_page(){
 	function wp_slug_translate_reset(){
-		update_option('wp_slug_translate_clientid','wp-slug-translate');
-		update_option('wp_slug_translate_clientsecret','pK2JdEwF/Janzz2O36Lgkq0QcDkc4Fuw0HqJvWVIFLQ=');
+		update_option('wp_slug_translate_apikey','');
+		update_option('wp_slug_translate_apibase','https://api.siliconflow.cn/v1');
+		update_option('wp_slug_translate_model','deepseek-ai/DeepSeek-V3');
 		update_option('wp_slug_translate_language','zh-CHS');
 		update_option('wp_slug_translate_secondmode','');
 		update_option('wp_slug_translate_deactivate','');
@@ -36,17 +62,44 @@ function wp_slug_translate_page(){
 <table class="form-table">
 	<tr valign="top">
 		<th scope="row">
-			Microsoft Azure Application<br />
-			<span style="font-family:Tahoma,sans-serif;font-size:12px;"><a href="https://datamarket.azure.com/dataset/1899a118-d202-492c-aa16-ba21c33c06cb" title="Step One" target="_blank">Subscribe</a> | <a href="https://datamarket.azure.com/developer/applications/register" title="Step Two" target="_blank">Register</a> | <a href="http://boliquan.com/microsoft-azure-application/" title="<?php _e('Apply for your own ClientID and ClientSecret','WP-Slug-Translate'); ?>" target="_blank"><?php _e('Tutorial','WP-Slug-Translate'); ?></a></span>
+			AI Translation Service<br />
+			<span style="font-family:Tahoma,sans-serif;font-size:12px;">Compatible with OpenAI-compatible API providers like SiliconFlow, DeepSeek, etc.</span>
 		</th>
 		<td>
 			<label>
-				<input type="text" name="wp_slug_translate_clientid" value="<?php echo get_option('wp_slug_translate_clientid'); ?>" style="width:300px;height:24px;" />
-				<code>ClientID</code>
+				<input type="text" name="wp_slug_translate_apikey" value="<?php echo get_option('wp_slug_translate_apikey'); ?>" style="width:300px;height:24px;" />
+				<code>API Key</code>
 			</label><br />
 			<label>
-				<input type="text" name="wp_slug_translate_clientsecret" value="<?php echo get_option('wp_slug_translate_clientsecret'); ?>" style="width:300px;height:24px;" />
-				<code>ClientSecret</code>
+				<input type="text" name="wp_slug_translate_apibase" value="<?php echo get_option('wp_slug_translate_apibase'); ?>" style="width:300px;height:24px;" />
+				<code>API Base URL</code>
+			</label><br />
+			<label>
+				<code>Model Name</code>
+				<select name="wp_slug_translate_model" id="wp-slug-translate-model" style="width:300px;height:28px;">
+					<?php
+					$models = wp_slug_translate_get_available_models();
+					$current_model = get_option('wp_slug_translate_model', 'deepseek-ai/DeepSeek-V3');
+
+					if ($models['success'] && !empty($models['models'])) {
+						foreach ($models['models'] as $model_id => $model_name) {
+							$selected = ($model_id == $current_model) ? 'selected="selected"' : '';
+							echo '<option value="' . esc_attr($model_id) . '" ' . $selected . '>' . esc_html($model_name) . '</option>';
+						}
+					} else {
+						// 如果没有可用模型,使用默认值
+						echo '<option value="' . esc_attr($current_model) . '" selected="selected">' . esc_html($current_model) . '</option>';
+					}
+					?>
+				</select>
+				<button type="button" id="wp-slug-translate-refresh-models" class="button button-secondary" style="vertical-align: middle; height: 28px;">
+					<span class="dashicons dashicons-update"></span>
+					刷新
+				</button>
+				<span id="wp-slug-translate-models-status" style="margin-left: 10px; font-size: 13px;"></span>
+				<?php if ($models['success']) : ?>
+					<br /><span style="font-size: 12px; color: #666;">共 <strong id="wp-slug-translate-models-count"><?php echo $models['total']; ?></strong> 个可用模型</span>
+				<?php endif; ?>
 			</label>
 		</td>
 	</tr>
@@ -153,11 +206,11 @@ function wp_slug_translate_page(){
 <h2>Description</h2>
 <p>
  1. WP Slug Translate can translate the post slug into english. It will take the post ID as slug when translation failure.<br />
- 2. "Microsoft Azure Application": Input your own ClientID and ClientSecret. Up to 2 million characters a month every account.<br />
- 3. "Source Language": Choose your language, 45 languages supported, powered by Microsoft Translator API.<br />
+ 2. "AI Translation Service": Input your API Key, API Base URL and Model Name. Compatible with OpenAI-compatible providers like SiliconFlow, DeepSeek, etc.<br />
+ 3. "Source Language": Choose your language, 45 languages supported.<br />
  4. "Second Mode": Running in the second mode, compatible with some synchronous plugins.<br />
- 5. When you have written an article, click "Publish", then the post slug will be automatically translated into English.<br />
- 6. For more information, please visit: <a href="http://boliquan.com/wp-slug-translate/" target="_blank">WP Slug Translate</a> | <a href="http://wordpress.org/plugins/wp-slug-translate/" target="_blank">Usage</a> | <a href="http://wordpress.org/plugins/wp-slug-translate/" target="_blank">Download</a>
+ 5. When you have written an article, click "Publish", then the post slug will be automatically translated into English with hyphens between words.<br />
+ 6. For more information, please visit: <a href="https://github.com/uu0/wp-slug-translate" target="_blank">WP Slug Translate</a>
 </p>
 
 <div class="icon32"><img src="<?php echo $donate_url; ?>" alt="Donate" /></div>
@@ -173,20 +226,14 @@ If you find my work useful and you want to encourage the development of more fre
 <br />
 
 <?php $blq_logo_url = plugins_url('/img/blq_32_32.jpg', __FILE__);?>
-<div class="icon32"><img src="<?php echo $blq_logo_url; ?>" alt="BoLiQuan" /></div>
+<div class="icon32"><img src="<?php echo $blq_logo_url; ?>" alt="WP Slug Translate" /></div>
 <h2>Related Links</h2>
 <ul style="margin:0 18px;">
-<li><a href="http://boliquan.com/wp-slug-translate/" target="_blank">WP Slug Translate (FAQ)</a> | <a href="http://boliquan.com/wp-slug-translate/" target="_blank">Submit Translations</a> | <a href="http://wordpress.org/plugins/wp-slug-translate/" target="_blank">Download</a></li>
-<li><a href="http://boliquan.com/wp-clean-up/" target="_blank">WP Clean Up</a> | <a href="http://wordpress.org/plugins/wp-clean-up/" target="_blank">Download</a></li>
-<li><a href="http://boliquan.com/wp-smtp/" target="_blank">WP SMTP</a> | <a href="http://wordpress.org/plugins/wp-smtp/" target="_blank">Download</a></li>
-<li><a href="http://boliquan.com/wp-anti-spam/" target="_blank">WP Anti Spam</a> | <a href="http://wordpress.org/plugins/wp-anti-spam/" target="_blank">Download</a></li>
-<li><a href="http://boliquan.com/wp-code-highlight/" target="_blank">WP Code Highlight</a> | <a href="http://wordpress.org/plugins/wp-code-highlight/" target="_blank">Download</a></li>
-<li><a href="http://boliquan.com/yg-share/" target="_blank">YG Share</a> | <a href="http://wordpress.org/plugins/yg-share/" target="_blank">Download</a></li>
-<li><a href="http://boliquan.com/ylife/" target="_blank">YLife</a> | <a href="http://code.google.com/p/ylife/downloads/list" target="_blank">Download</a></li>
-<li><a href="http://boliquan.com/" target="_blank">BoLiQuan</a></li>
+<li><a href="https://github.com/uu0/wp-slug-translate" target="_blank">WP Slug Translate (GitHub)</a></li>
+<li><a href="https://github.com/uu0" target="_blank">uu0 (GitHub)</a></li>
 </ul>
 
-<div style="text-align:center; margin:60px 0px 10px 0px;">&copy; <?php echo date("Y"); ?> BoLiQuan.COM</div>
+<div style="text-align:center; margin:60px 0px 10px 0px;">&copy; <?php echo date("Y"); ?> uu0</div>
 
 </div>
 <?php 
