@@ -43,21 +43,34 @@ function wp_slug_translate_get_available_models($force_refresh = false) {
 				'Authorization' => 'Bearer ' . $api_key,
 				'Content-Type'  => 'application/json',
 			),
-			'timeout' => 30
+			'timeout' => 30,
+			'sslverify' => false
 		));
 
 		if (is_wp_error($response)) {
+			error_log('WP Slug Translate - 请求失败: ' . $response->get_error_message());
 			return $response;
+		}
+
+		$http_code = wp_remote_retrieve_response_code($response);
+		if ($http_code !== 200) {
+			$body = wp_remote_retrieve_body($response);
+			error_log('WP Slug Translate - HTTP错误: ' . $http_code . ' - Body: ' . substr($body, 0, 500));
+			return new WP_Error('http_error', 'API请求失败，HTTP状态码: ' . $http_code);
 		}
 
 		$body = wp_remote_retrieve_body($response);
 		$data = json_decode($body, true);
 
 		if (json_last_error() !== JSON_ERROR_NONE) {
-			return new WP_Error('json_decode_error', '无法解析API响应');
+			// 记录原始响应以便调试
+			error_log('WP Slug Translate - JSON解析失败: ' . json_last_error_msg());
+			error_log('WP Slug Translate - 原始响应: ' . substr($body, 0, 500));
+			return new WP_Error('json_decode_error', '无法解析API响应，请检查API URL配置是否正确');
 		}
 
 		if (!isset($data['data'])) {
+			error_log('WP Slug Translate - API响应缺少data字段: ' . print_r($data, true));
 			return new WP_Error('invalid_response', 'API返回数据格式不正确');
 		}
 
